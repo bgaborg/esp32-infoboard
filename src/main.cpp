@@ -18,7 +18,7 @@ const long NEAR_S = 20 * 60;
 const uint32_t RETRY_MS = 60000;               // retry interval after a failed request
 const uint32_t MIN_GAP_MS = 10000;             // min time between any two requests (wake, BOOT)
 const uint8_t TIMEOUTS_MIN[] = {5, 15, 30, 0};  // hold cycles these, 0 = always on
-const uint8_t DEFAULT_TIMEOUT_IDX = 1;         // 15 min
+const uint8_t DEFAULT_TIMEOUT_IDX = 0;         // 5 min
 const uint8_t BL_DAY = 255, BL_NIGHT = 40;     // backlight PWM 0-255
 const int DIM_FROM_H = 22, DIM_TO_H = 6;       // night dimming hours
 const uint32_t HOLD_MS = 1500;

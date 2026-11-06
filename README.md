@@ -13,7 +13,7 @@ Terms: **screen** = the physical display. **page** = one app (transit, weather).
 - Colors: green = live GPS time, orange `+N` = late by N minutes, white = timetable only, red `elmarad` = canceled.
 - BKK alerts for the shown routes scroll in the footer (header and full description).
 - The footer shows WiFi state, stale-data warning, or WiFi signal strength.
-- Screen timeout (default 15 min). No API polls while the screen is off.
+- Screen timeout (default 5 min). No API polls while the screen is off.
 - Night dimming 22:00-06:00.
 
 ## Controls
