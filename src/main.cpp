@@ -15,7 +15,8 @@
 const uint32_t POLL_MS = 30000;                // poll when a bus is due within NEAR_S
 const uint32_t POLL_FAR_MS = 90000;            // poll when the next bus is further away
 const long NEAR_S = 20 * 60;
-const uint32_t MAX_BACKOFF_MS = 300000;        // max retry interval on errors
+const uint32_t RETRY_MS = 60000;               // retry interval after a failed request
+const uint32_t MIN_GAP_MS = 10000;             // min time between any two requests (wake, BOOT)
 const uint8_t TIMEOUTS_MIN[] = {5, 15, 30, 0};  // hold cycles these, 0 = always on
 const uint8_t DEFAULT_TIMEOUT_IDX = 1;         // 15 min
 const uint8_t BL_DAY = 255, BL_NIGHT = 40;     // backlight PWM 0-255
@@ -41,7 +42,7 @@ const int MAXD = 8, MAX_ROWS = 6, ROW_H = 26, FOOT_Y = 219;
 const uint16_t BKK_BLUE = 0x04FC;  // #009EE3
 
 struct Dep { const char* route; char head[24]; time_t t; bool live, canceled; int delay; };
-struct Data { Dep deps[2][MAXD]; int n[2]; char alert[640]; time_t lastOk; };
+struct Data { Dep deps[2][MAXD]; int n[2]; char alert[640]; time_t lastOk; int err; };  // err: 0 ok, HTTP code, or -100 JSON
 
 Data shared;  // written by fetch task, guarded by mtx
 Data cur;     // render copy, loop task only
@@ -63,7 +64,15 @@ char msg[48];
 
 // --- fetch (own FreeRTOS task, so drawing never stalls) ---
 
-bool fetch(Data& out) {
+void logFail(WiFiClientSecure& client, const char* what, int code) {
+  char tls[80] = "";
+  client.lastError(tls, sizeof tls);
+  Serial.printf("FAIL %s %d | tls: %s | rssi %d | heap %u, max block %u | up %lus, reset reason %d\n", what, code, tls,
+                (int)WiFi.RSSI(), ESP.getFreeHeap(), ESP.getMaxAllocHeap(), millis() / 1000, (int)esp_reset_reason());
+}
+
+// Returns 0 on success, else the HTTP code (negative = connection error) or -100 for bad JSON.
+int fetch(Data& out) {
   WiFiClientSecure client;
   client.setCACert(BKK_ROOT_CA);
   HTTPClient http;
@@ -72,9 +81,9 @@ bool fetch(Data& out) {
   http.begin(client, URL);
   int code = http.GET();
   if (code != 200) {
-    Serial.printf("HTTP %d\n", code);
+    logFail(client, "HTTP", code);
     http.end();
-    return false;
+    return code;
   }
   JsonDocument filter;
   JsonObject st = filter["data"]["entry"]["stopTimes"].add<JsonObject>();
@@ -86,8 +95,8 @@ bool fetch(Data& out) {
   DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
   http.end();
   if (err) {
-    Serial.printf("JSON %s\n", err.c_str());
-    return false;
+    logFail(client, err.c_str(), -100);
+    return -100;
   }
 
   JsonObject refs = doc["data"]["references"];
@@ -130,8 +139,9 @@ bool fetch(Data& out) {
     }
   }
   out.lastOk = now;
-  Serial.printf("ok %d+%d deps, alert %u chars, heap %u\n", out.n[0], out.n[1], strlen(out.alert), ESP.getFreeHeap());
-  return true;
+  Serial.printf("ok %d+%d deps, alert %u chars, heap %u, max block %u, rssi %d\n", out.n[0], out.n[1],
+                strlen(out.alert), ESP.getFreeHeap(), ESP.getMaxAllocHeap(), (int)WiFi.RSSI());
+  return 0;
 }
 
 uint32_t nextInterval(const Data& d) {
@@ -144,20 +154,19 @@ uint32_t nextInterval(const Data& d) {
 
 void fetchTask(void*) {
   static Data tmp;
-  uint32_t fails = 0, wait = 0;
+  uint32_t wait = 0, lastTry = 0 - MIN_GAP_MS;  // first attempt passes the gap check
   for (;;) {
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait));  // notify = fetch now
     if (!screenOn || time(nullptr) < 1700000000 || WiFi.status() != WL_CONNECTED) { wait = 1000; continue; }
-    if (fetch(tmp)) {
-      fails = 0;
-      xSemaphoreTake(mtx, portMAX_DELAY);
-      shared = tmp;
-      xSemaphoreGive(mtx);
-      wait = nextInterval(tmp);
-    } else {
-      fails++;
-      wait = std::min<uint32_t>(POLL_MS << std::min<uint32_t>(fails, 4), MAX_BACKOFF_MS);
-    }
+    uint32_t since = millis() - lastTry;
+    if (since < MIN_GAP_MS) { wait = MIN_GAP_MS - since; continue; }
+    lastTry = millis();
+    int err = fetch(tmp);
+    xSemaphoreTake(mtx, portMAX_DELAY);
+    if (!err) shared = tmp;
+    shared.err = err;
+    xSemaphoreGive(mtx);
+    wait = err ? RETRY_MS : nextInterval(tmp);
   }
 }
 
@@ -260,7 +269,11 @@ void drawFooter(time_t now) {
   if ((int32_t)(millis() - msgUntil) < 0) { snprintf(line, sizeof line, "%s", msg); col = TFT_CYAN; }
   else if (WiFi.status() != WL_CONNECTED) { snprintf(line, sizeof line, "WiFi kapcsolodas..."); col = TFT_RED; }
   else if (age < 0) snprintf(line, sizeof line, "Adatok betoltese...");
-  else if (age > 180) { snprintf(line, sizeof line, "Regi adat: %ld perce", age / 60); col = TFT_RED; }
+  else if (age > 180) {
+    int o = snprintf(line, sizeof line, "Regi adat: %ld perce", age / 60);
+    if (cur.err) snprintf(line + o, sizeof line - o, " (hiba %d)", cur.err);
+    col = TFT_RED;
+  }
   else if (cur.alert[0]) ticker = true;
   else snprintf(line, sizeof line, "WiFi %d dBm", (int)WiFi.RSSI());
 
@@ -312,6 +325,7 @@ void cycleTimeout() {
 
 void setup() {
   Serial.begin(115200);
+  Serial.printf("boot, reset reason %d\n", (int)esp_reset_reason());
   pinMode(KEY_PIN, INPUT_PULLUP);
   pinMode(TP_RST, OUTPUT);
   digitalWrite(TP_RST, LOW);
