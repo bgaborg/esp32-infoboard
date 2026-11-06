@@ -36,6 +36,7 @@ const char* TITLES[2] = {CFG_STOP_A_TITLE, CFG_STOP_B_TITLE};
 struct Route { const char* id; const char* name; };
 const Route ROUTES[] = CFG_ROUTES;
 
+const int DATE_X = 238, DATE_W = 110;  // header date: right edge, max width
 const int MAXD = 8, MAX_ROWS = 6, ROW_H = 26, FOOT_Y = 219;
 const uint16_t BKK_BLUE = 0x04FC;  // #009EE3
 
@@ -227,6 +228,17 @@ void render(time_t now) {
   tft.drawString(lt.tm_year > 120 ? clk : "--:--:--", 316, 11, 2);
   tft.setTextPadding(0);
 
+  static const char* DAYS[] = {"Vasarnap", "Hetfo", "Kedd", "Szerda", "Csutortok", "Pentek", "Szombat"};
+  static int lastDay = -1;
+  if (lt.tm_year > 120 && lt.tm_yday != lastDay) {  // date changes once a day
+    lastDay = lt.tm_yday;
+    char date[24];
+    snprintf(date, sizeof date, "%02d.%02d. %s", lt.tm_mon + 1, lt.tm_mday, DAYS[lt.tm_wday]);
+    tft.setTextPadding(DATE_W);
+    tft.drawString(date, DATE_X, 11, 2);
+    tft.setTextPadding(0);
+  }
+
   int rows = view == 0 ? 3 : MAX_ROWS;
   for (int k = 0; k < (view == 0 ? 2 : 1); k++) {
     int dir = view == 0 ? k : view - 1, y0 = 42 + k * 98, r = 0;
@@ -320,6 +332,7 @@ void setup() {
   tft.setTextDatum(ML_DATUM);
   char title[40];
   asciify(CFG_STOP_NAME, title, sizeof title);
+  for (size_t n = strlen(title); n && tft.textWidth(title, 2) > DATE_X - DATE_W - 12; n--) title[n - 1] = 0;
   tft.drawString(title, 4, 11, 2);
   drawLayout();
   foot.createSprite(320, 20);
