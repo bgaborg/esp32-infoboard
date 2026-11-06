@@ -1,0 +1,4 @@
+.pio/
+.env
+src/config.h
+test/check
